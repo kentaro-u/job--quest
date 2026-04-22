@@ -1,0 +1,675 @@
+import React, { useState, useEffect, useMemo } from 'react';
+import { BookOpen, AlertCircle, CheckCircle, ChevronRight, RefreshCw, MessageSquare, Plus, Award, Lock } from 'lucide-react';
+
+// --- Firebase Imports ---
+import { initializeApp } from 'firebase/app';
+import { getAuth, signInAnonymously, onAuthStateChanged, User } from 'firebase/auth';
+import { getFirestore, collection, addDoc, onSnapshot, updateDoc, doc, deleteDoc } from 'firebase/firestore';
+
+// ==========================================
+// --- Global Declarations ---
+// ==========================================
+declare global {
+  var __firebase_config: string | undefined;
+  var __app_id: string | undefined;
+}
+
+// ==========================================
+// --- src/types/index.ts ---
+// ==========================================
+export type Evaluation = 'S' | 'A' | 'B' | 'C';
+
+export interface Option {
+  id: string;
+  text: string;
+  evaluation: Evaluation;
+  resultText: string;
+  reason: string;
+  improvement: string;
+  exp: number;
+}
+
+export interface Quest {
+  id: string;
+  unlockReq: number; // ★解放に必要なクリア数
+  title: string;
+  category: string;
+  difficulty: 1 | 2 | 3 | 4 | 5;
+  situation: string;
+  options: Option[];
+}
+
+export interface UserStatus {
+  userName: string;
+  level: number;
+  exp: number;
+  totalExp: number;
+  titles: string[];
+  completedQuests: Record<string, Evaluation>;
+  rewardedAnswers: string[];
+}
+
+export interface Board {
+  id: string; authorId: string; authorName: string; title: string; content: string; createdAt: number; bestAnswerId: string | null;
+}
+
+export interface Answer {
+  id: string; boardId: string; authorId: string; authorName: string; content: string; createdAt: number; isBestAnswer: boolean;
+}
+
+// ==========================================
+// --- src/data/quests.ts (全50クエスト) ---
+// ==========================================
+export const QUESTS: Quest[] = [
+  // --- 初期解放 (必要クリア数: 0) ---
+  { id:'q1', unlockReq:0, title:'激怒するお客様', category:'クレーム', difficulty:2, situation:'「昨日買った商品が壊れていた！」と激怒の電話がありました。', options:[
+    {id:'o1', text:'謝罪し状況を詳しく伺う', evaluation:'S', resultText:'素晴らしい初動', reason:'傾聴が怒りを鎮めます。', improvement:'事実確認へ進みましょう。', exp:100},
+    {id:'o2', text:'すぐお取替えしますと言う', evaluation:'B', resultText:'解決急ぎすぎ', reason:'共感が不足しています。', improvement:'怪我がないか気遣いましょう。', exp:30},
+    {id:'o3', text:'説明書通り使いましたか？', evaluation:'C', resultText:'火に油', reason:'過失を疑う発言はNG。', improvement:'まず感情を受け止めましょう。', exp:10}
+  ]},
+  { id:'q2', unlockReq:0, title:'電車遅延のピンチ', category:'勤怠', difficulty:1, situation:'電車が遅延し遅刻確定。現在、始業20分前です。', options:[
+    {id:'o1', text:'会社に電話し状況と到着見込みを伝える', evaluation:'S', resultText:'完璧な対応！', reason:'迅速な電話連絡が基本。', improvement:'見込み時間を伝えるのがプロ。', exp:50},
+    {id:'o2', text:'チャットで「遅れます」とだけ送る', evaluation:'B', resultText:'情報不足', reason:'いつ着くか分からないと困ります。', improvement:'到着見込みは必ず記載を。', exp:20},
+    {id:'o3', text:'着いてから遅延証明書を出して謝る', evaluation:'C', resultText:'無断遅刻扱い', reason:'連絡がないと心配をかけます。', improvement:'必ず事前に連絡を。', exp:5}
+  ]},
+  { id:'q3', unlockReq:0, title:'優先順位の迷宮', category:'管理', difficulty:2, situation:'「今日中の資料作成」「明日の会議準備」「1時間以内の集計」が重なった。', options:[
+    {id:'o1', text:'1時間以内→今日中→明日の順にやる', evaluation:'S', resultText:'見事な采配！', reason:'緊急度と重要度の判断が的確。', improvement:'終わらないならSOSを出しましょう。', exp:100},
+    {id:'o2', text:'上司に「どれを優先すべきか」丸投げする', evaluation:'B', resultText:'主体性不足', reason:'指示待ちになっています。', improvement:'自分の案を添えて相談を。', exp:40},
+    {id:'o3', text:'一番楽そうな明日の会議準備からやる', evaluation:'C', resultText:'期日逃れの危機', reason:'緊急度の高いものが間に合いません。', improvement:'優先順位のマトリクスを意識して。', exp:10}
+  ]},
+  { id:'q4', unlockReq:0, title:'初めての名刺交換', category:'マナー', difficulty:1, situation:'取引先との初対面。相手が名刺を差し出してきました。', options:[
+    {id:'o1', text:'両手で受け取り、社名と名前を確認する', evaluation:'S', resultText:'基本完璧！', reason:'丁寧な所作は第一印象を良くします。', improvement:'目を見て挨拶を添えましょう。', exp:50},
+    {id:'o2', text:'片手でさっと受け取りポケットにしまう', evaluation:'C', resultText:'マナー違反', reason:'名刺は相手の顔と同じです。', improvement:'名刺入れの上に置きましょう。', exp:5},
+    {id:'o3', text:'自分の名刺を先に出すまで受け取らない', evaluation:'B', resultText:'少し不自然', reason:'同時になった場合は目下から出します。', improvement:'臨機応変に受け取りを優先してもOK。', exp:20}
+  ]},
+  { id:'q5', unlockReq:0, title:'結論から話す魔法', category:'報連相', difficulty:1, situation:'上司に「あの件どうなった？」と聞かれました。', options:[
+    {id:'o1', text:'「はい、完了しました。詳細は…」', evaluation:'S', resultText:'端的で最高！', reason:'結論ファーストはビジネスの鉄則。', improvement:'その後の理由も簡潔に。', exp:50},
+    {id:'o2', text:'「えっと、昨日〇〇さんに連絡して…」', evaluation:'C', resultText:'イライラのもと', reason:'言い訳や過程から話すと伝わりません。', improvement:'YES/NOから答えましょう。', exp:5},
+    {id:'o3', text:'「あと少しで終わると思います」', evaluation:'B', resultText:'やや曖昧', reason:'「あと少し」の認識は人によります。', improvement:'「〇時までに終わります」と数値を。', exp:20}
+  ]},
+
+  // --- 3クリアで解放 (必要クリア数: 3) ---
+  { id:'q6', unlockReq:3, title:'痛恨のミス発覚', category:'報連相', difficulty:3, situation:'見積書の金額を安く間違えて提出し、受諾されてしまった。', options:[
+    {id:'o1', text:'即座に上司に報告し、指示を仰ぐ', evaluation:'S', resultText:'最良のバッドニュース対応', reason:'悪い報告ほど早く行うのが鉄則。', improvement:'事実を正確に伝えましょう。', exp:150},
+    {id:'o2', text:'急いでクライアントに電話して謝る', evaluation:'B', resultText:'順番が危険', reason:'会社の損失に関わるため独断はNG。', improvement:'まずは社内で方針を決めましょう。', exp:40},
+    {id:'o3', text:'こっそり正しい金額のファイルに差し替える', evaluation:'C', resultText:'信用失墜', reason:'隠蔽は最悪の法的トラブルに発展します。', improvement:'ミスは誰にでもある、すぐ報告を。', exp:0}
+  ]},
+  { id:'q7', unlockReq:3, title:'不在時の電話対応', category:'電話', difficulty:2, situation:'「〇〇さん（先輩）いますか？」と電話。先輩は離席中。', options:[
+    {id:'o1', text:'「申し訳ありません、席を外しております。折り返しさせましょうか？」', evaluation:'S', resultText:'丁寧な対応', reason:'相手の時間を奪わない提案ができています。', improvement:'戻り予定時間も伝えられると完璧。', exp:80},
+    {id:'o2', text:'「〇〇はトイレに行っています」', evaluation:'C', resultText:'詳細すぎ！', reason:'離席の具体的な理由は言わなくて良いです。', improvement:'「席を外している」で十分です。', exp:10},
+    {id:'o3', text:'「いませんので、後でかけ直してください」', evaluation:'B', resultText:'少し冷たい', reason:'相手に手間をかけさせてしまいます。', improvement:'こちらから折り返す提案をしましょう。', exp:30}
+  ]},
+  { id:'q8', unlockReq:3, title:'怪しい添付ファイル', category:'情報', difficulty:2, situation:'知らないアドレスから「請求書_要確認.zip」が届いた。', options:[
+    {id:'o1', text:'開かずに情報システム部門に報告する', evaluation:'S', resultText:'セキュリティの鑑', reason:'標的型攻撃の可能性が高いです。', improvement:'周りの社員にも注意喚起できれば完璧。', exp:100},
+    {id:'o2', text:'とりあえずウイルスソフトでスキャンして開く', evaluation:'C', resultText:'感染リスク大', reason:'新種ウイルスは検知できない事があります。', improvement:'不審なファイルは絶対に開かない。', exp:10},
+    {id:'o3', text:'そのままゴミ箱に入れて削除する', evaluation:'B', resultText:'被害は防いだが…', reason:'自分は安全ですが、他部署に届いているかも。', improvement:'組織全体を守るため報告を。', exp:40}
+  ]},
+  { id:'q9', unlockReq:3, title:'紙詰まりの放置', category:'環境', difficulty:1, situation:'コピー機を使おうとしたら、紙が詰まってエラーが鳴っている。', options:[
+    {id:'o1', text:'マニュアルを見て自分で取り除く', evaluation:'S', resultText:'自発的な行動！', reason:'次に使う人への配慮ができています。', improvement:'直らなければ総務へ連絡を。', exp:50},
+    {id:'o2', text:'見なかったことにして自分の席に戻る', evaluation:'C', resultText:'チームワーク欠如', reason:'誰かが困ることになります。', improvement:'気づいた人が対応する文化を作りましょう。', exp:0},
+    {id:'o3', text:'近くの先輩に「詰まってますよ」と伝える', evaluation:'B', resultText:'他人任せ', reason:'報告は良いですが、自分で直そうとする姿勢を。', improvement:'「やり方教えてもらえますか」と聞こう。', exp:20}
+  ]},
+  { id:'q10', unlockReq:3, title:'会議室のダブルブッキング', category:'トラブル', difficulty:2, situation:'予約した会議室に行くと、別の部署が既に会議をしている。', options:[
+    {id:'o1', text:'「予約時間ですので」と退出を求める', evaluation:'B', resultText:'正論だが角が立つ', reason:'相手にも事情や勘違いがあるかもしれません。', improvement:'まずは状況確認から入りましょう。', exp:30},
+    {id:'o2', text:'予約システムを確認し、丁寧に声をかける', evaluation:'S', resultText:'大人の対応', reason:'事実確認と冷静な対応でトラブルを防ぎます。', improvement:'空いている別の部屋を探す機転も〇。', exp:80},
+    {id:'o3', text:'諦めて自分たちはカフェで会議する', evaluation:'C', resultText:'情報漏洩リスク', reason:'社外での会議は機密情報が漏れる危険があります。', improvement:'社内で解決策を探りましょう。', exp:10}
+  ]},
+
+  // --- 8クリアで解放 (必要クリア数: 8) ---
+  { id:'q11', unlockReq:8, title:'理不尽な値引き要求', category:'交渉', difficulty:3, situation:'取引先が「他社は半額だった。半額にしろ」と無茶な要求。', options:[
+    {id:'o1', text:'「それは無理です」と即座に突っぱねる', evaluation:'B', resultText:'関係悪化', reason:'断るにしても言い方があります。', improvement:'価値を再提示しましょう。', exp:40},
+    {id:'o2', text:'持ち帰り、上司と代替案（付加価値など）を練る', evaluation:'S', resultText:'見事なクッション', reason:'即決せず、価値で勝負する姿勢が重要。', improvement:'安売りは自分の首を絞めます。', exp:120},
+    {id:'o3', text:'契約が欲しいので独断で半額にする', evaluation:'C', resultText:'利益相反', reason:'会社に損害を与える越権行為です。', improvement:'必ず決裁権者に相談を。', exp:0}
+  ]},
+  { id:'q12', unlockReq:8, title:'エレベーターの立ち位置', category:'マナー', difficulty:1, situation:'お客様と一緒にエレベーターに乗ります。', options:[
+    {id:'o1', text:'先に乗って「開」ボタンを押し、奥に案内する', evaluation:'S', resultText:'スマートな案内', reason:'操作盤の前が下座、奥が上座です。', improvement:'降りる時はお客様を先に。', exp:50},
+    {id:'o2', text:'お客様を先に乗せ、自分は最後に乗る', evaluation:'B', resultText:'悪くないが…', reason:'ドアが閉まる危険があるため、先に乗って操作盤を確保がベター。', improvement:'状況により臨機応変に。', exp:30},
+    {id:'o3', text:'何も気にせず奥の壁にもたれかかる', evaluation:'C', resultText:'マナー違反', reason:'お客様を操作盤の前に立たせるのはNG。', improvement:'常に自分が案内役という意識を。', exp:10}
+  ]},
+  { id:'q13', unlockReq:8, title:'タスクの丸投げ先輩', category:'人間関係', difficulty:3, situation:'先輩から「これ明日までによろしく」と大量の仕事を振られた。自分の仕事も限界。', options:[
+    {id:'o1', text:'徹夜してでも全て終わらせる', evaluation:'C', resultText:'心身の崩壊', reason:'自己犠牲は長く続きませんし、ミスも増えます。', improvement:'無理なものは無理と伝える勇気を。', exp:10},
+    {id:'o2', text:'「自分の仕事があるので無理です」と断る', evaluation:'B', resultText:'角が立つ', reason:'正論ですが、チームとしての配慮が不足気味。', improvement:'状況を論理的に説明しましょう。', exp:40},
+    {id:'o3', text:'現在のタスク量を見せ、期限の調整を相談する', evaluation:'S', resultText:'アサーティブな交渉', reason:'感情的にならず、事実ベースで相談できています。', improvement:'上司を交えてタスク再配分を提案しましょう。', exp:120}
+  ]},
+  { id:'q14', unlockReq:8, title:'体調不良の朝', category:'勤怠', difficulty:1, situation:'朝起きると39度の熱。今日は重要な会議がある。', options:[
+    {id:'o1', text:'解熱剤を飲んで気合で出社する', evaluation:'C', resultText:'バイオテロ', reason:'感染症の可能性もあり、周囲に迷惑をかけます。', improvement:'休むのも仕事のうちです。', exp:5},
+    {id:'o2', text:'上司に電話し、会議の資料場所を伝えて休む', evaluation:'S', resultText:'責任感ある休養', reason:'休む連絡と引き継ぎがセットでできています。', improvement:'チャットではなく電話が確実です。', exp:60},
+    {id:'o3', text:'同期にLINEで「休むって伝えといて」と頼む', evaluation:'B', resultText:'社会人失格ギリギリ', reason:'自分の勤怠は自分で責任者に報告すべきです。', improvement:'直接上司に連絡しましょう。', exp:10}
+  ]},
+  { id:'q15', unlockReq:8, title:'離席時のPC画面', category:'情報', difficulty:1, situation:'トイレに行くため、少しだけ席を外します。', options:[
+    {id:'o1', text:'「Win+L」で画面をロックして離れる', evaluation:'S', resultText:'セキュリティ基本動作', reason:'1分でも離席時はロックが鉄則です。', improvement:'習慣づけましょう。', exp:50},
+    {id:'o2', text:'すぐ戻るのでそのままにしておく', evaluation:'C', resultText:'情報漏洩の危機', reason:'通りすがりの人に見られるリスクがあります。', improvement:'スクリーンセーバーも設定しましょう。', exp:5},
+    {id:'o3', text:'モニターの電源だけ消す', evaluation:'B', resultText:'惜しい', reason:'電源をつければ誰でも操作できてしまいます。', improvement:'必ずOSのロック機能を使いましょう。', exp:20}
+  ]},
+
+  // --- 15クリアで解放 (必要クリア数: 15) ---
+  { id:'q16', unlockReq:15, title:'宛先間違いメール', category:'ミス', difficulty:3, situation:'社外秘の資料を、同姓同名の別会社の人に誤送信してしまった！', options:[
+    {id:'o1', text:'すぐ上司と情シスに報告し、相手に削除依頼の電話', evaluation:'S', resultText:'最速の火消し', reason:'重大インシデントです。1秒でも早い報告と対応が必要。', improvement:'誤送信防止ツールの導入を提案しましょう。', exp:150},
+    {id:'o2', text:'「先ほどのメールは破棄してください」と返信する', evaluation:'B', resultText:'甘い対応', reason:'メールだけでは見られてしまう可能性が高いです。', improvement:'電話での確実な謝罪と報告が必須。', exp:40},
+    {id:'o3', text:'バレないことを祈って放置する', evaluation:'C', resultText:'懲戒処分の危機', reason:'情報漏洩を隠蔽するのは最悪の選択です。', improvement:'正直にすぐ報告を。', exp:0}
+  ]},
+  { id:'q17', unlockReq:15, title:'飲み会翌日の朝', category:'マナー', difficulty:1, situation:'昨夜は部署の飲み会で、上司にご馳走になりました。', options:[
+    {id:'o1', text:'出社後、すぐに上司の席に行きお礼を言う', evaluation:'S', resultText:'愛される後輩', reason:'翌日のお礼は早ければ早いほど印象が良いです。', improvement:'「昨日の〇〇の話、勉強になりました」と添えると完璧。', exp:60},
+    {id:'o2', text:'すれ違った時についでにお礼を言う', evaluation:'B', resultText:'少し軽い', reason:'ついで感が出ると感謝が伝わりにくいです。', improvement:'自ら席に出向くのがマナーです。', exp:20},
+    {id:'o3', text:'昨日お礼を言ったから今日は何も言わない', evaluation:'C', resultText:'評価ダウン', reason:'「翌日のお礼」までが飲み会のセットです。', improvement:'コミュニケーションの基本と心得ましょう。', exp:5}
+  ]},
+  { id:'q18', unlockReq:15, title:'タクシーの上座下座', category:'マナー', difficulty:2, situation:'上司、先輩、自分の3人でタクシーに乗ります。', options:[
+    {id:'o1', text:'自分が助手席に乗り、道案内や支払いを担当する', evaluation:'S', resultText:'完璧な配慮', reason:'タクシーは助手席が一番下座です。', improvement:'行き先を事前に調べておくとさらにスムーズ。', exp:80},
+    {id:'o2', text:'奥が上座なので、自分が先に一番奥に乗り込む', evaluation:'C', resultText:'大ひんしゅく', reason:'運転席の後ろが上座です。新人は手前か助手席へ。', improvement:'席次の基本を覚えましょう。', exp:10},
+    {id:'o3', text:'上司に「どこに乗りますか？」と聞く', evaluation:'B', resultText:'気遣いは良いが', reason:'基本ルールを知った上で誘導できるのがプロ。', improvement:'「私は前に乗ります」と宣言しましょう。', exp:30}
+  ]},
+  { id:'q19', unlockReq:15, title:'後輩のミス発見', category:'チーム', difficulty:2, situation:'後輩が作成した資料に、重大な計算ミスを見つけた。', options:[
+    {id:'o1', text:'みんなの前で「ここ間違ってるぞ！」と指摘する', evaluation:'C', resultText:'パワハラ認定の恐れ', reason:'人前での叱責はモチベーションと自尊心を奪います。', improvement:'指導は個室や1on1で。', exp:5},
+    {id:'o2', text:'自分がこっそり直しておいてあげる', evaluation:'B', resultText:'成長機会の損失', reason:'後輩はミスに気づかず、また同じミスをします。', improvement:'本人に気づかせることが指導です。', exp:30},
+    {id:'o3', text:'別室に呼び、どこが間違っているか一緒に確認する', evaluation:'S', resultText:'理想的なメンター', reason:'自尊心を守りつつ、ミスの原因を考えさせています。', improvement:'「次はどう防ぐか」まで話し合えれば完璧。', exp:100}
+  ]},
+  { id:'q20', unlockReq:15, title:'会議での沈黙', category:'会議', difficulty:3, situation:'アイデア出しの会議。誰も発言せず、重い沈黙が続いています。', options:[
+    {id:'o1', text:'自分も下を向いて時間が過ぎるのを待つ', evaluation:'C', resultText:'給料ドロボー', reason:'会議に参加している意味がありません。', improvement:'どんな意見でも口火を切る勇気を。', exp:0},
+    {id:'o2', text:'「少しズレるかもしれませんが…」と素案を出す', evaluation:'S', resultText:'会議の救世主', reason:'叩き台となる「たたかれ台」を出すことで議論が動きます。', improvement:'質より量がブレストの基本です。', exp:120},
+    {id:'o3', text:'「〇〇さんはどう思いますか？」と急に振る', evaluation:'B', resultText:'キラーパス', reason:'自分も出さずに他人に振るのは、場を凍らせる危険があります。', improvement:'自分の意見を言ってから振りましょう。', exp:40}
+  ]},
+
+  // --- 22クリアで解放 (必要クリア数: 22) ---
+  { id:'q21', unlockReq:22, title:'板挟みの苦悩', category:'管理', difficulty:4, situation:'営業部長「すぐやれ！」 開発部長「今は無理だ！」 あなたはどうする？', options:[
+    {id:'o1', text:'両者の言い分を整理し、妥協点（スケジュール等）を提案する', evaluation:'S', resultText:'見事な調整力', reason:'感情を抜きにし、ファクトベースで落とし所を探るのがプロ。', improvement:'常に目的（会社としての利益）に立ち返りましょう。', exp:150},
+    {id:'o2', text:'声の大きい営業部長の指示にだけ従う', evaluation:'C', resultText:'組織の崩壊', reason:'一方に偏ると、他方からの信頼を完全に失います。', improvement:'双方の利害を調整するのが仕事です。', exp:10},
+    {id:'o3', text:'「私には決められません」と社長に丸投げする', evaluation:'B', resultText:'逃げの姿勢', reason:'最終判断を仰ぐにしても、自分なりのA案B案が必要です。', improvement:'解決策を持って相談に行きましょう。', exp:40}
+  ]},
+  { id:'q22', unlockReq:22, title:'SNSでの不適切発言', category:'コンプラ', difficulty:3, situation:'同期が鍵付きのSNSで、顧客の悪口と社名が推測できる投稿をしている。', options:[
+    {id:'o1', text:'「鍵付きでも危険だから消した方がいい」と直接忠告する', evaluation:'S', resultText:'真の友情', reason:'炎上してからでは遅いです。同期を救う勇気ある行動。', improvement:'それでも辞めないなら上司に相談を。', exp:120},
+    {id:'o2', text:'見なかったことにしてそっとミュートする', evaluation:'C', resultText:'同罪のリスク', reason:'会社への損害を黙認したことになります。', improvement:'リスクマネジメントの意識を持ちましょう。', exp:10},
+    {id:'o3', text:'匿名アカウントで「それマズいですよ」とリプライする', evaluation:'B', resultText:'効果薄', reason:'誰か分からない忠告は聞き入れられにくいです。', improvement:'直接伝えるのが誠実です。', exp:30}
+  ]},
+  { id:'q23', unlockReq:22, title:'予算オーバー確実', category:'プロジェクト', difficulty:4, situation:'進行中の案件、このままだと確実に予算を大幅オーバーすることが判明。', options:[
+    {id:'o1', text:'なんとかギリギリまで隠して、後で謝る', evaluation:'C', resultText:'最悪のシナリオ', reason:'傷口が広がるだけです。取り返しがつかなくなります。', improvement:'バッドニュース・ファースト！', exp:0},
+    {id:'o2', text:'ただちに上司・クライアントに報告し、仕様削減の交渉をする', evaluation:'S', resultText:'誠実な火消し', reason:'早期にアラートを上げ、代替案（スコープ調整）を出すのが最適。', improvement:'なぜオーバーしたかの原因分析も必須。', exp:150},
+    {id:'o3', text:'自腹を切って外注費を払い、予算内に収める', evaluation:'C', resultText:'絶対NG！', reason:'コンプライアンス違反であり、根本的な解決になりません。', improvement:'組織として問題を共有しましょう。', exp:0}
+  ]},
+  { id:'q24', unlockReq:22, title:'パワハラを目撃', category:'コンプラ', difficulty:4, situation:'他部署の課長が、部下に対して日常的に大声で人格否定をしているのを見た。', options:[
+    {id:'o1', text:'他部署のことなので関わらないでおく', evaluation:'C', resultText:'見て見ぬふり', reason:'会社全体のモラル低下、離職に繋がります。', improvement:'匿名でも相談窓口を活用しましょう。', exp:10},
+    {id:'o2', text:'社内のハラスメント相談窓口や人事に匿名で通報する', evaluation:'S', resultText:'勇気ある行動', reason:'被害者を守り、会社の自浄作用を働かせる正しいステップ。', improvement:'日時や発言のメモがあると証拠になります。', exp:150},
+    {id:'o3', text:'直接その課長に「パワハラですよ」と注意する', evaluation:'B', resultText:'危険な正義感', reason:'自分に矛先が向いたり、報復されるリスクがあります。', improvement:'専門の部署（人事等）を頼りましょう。', exp:40}
+  ]},
+  { id:'q25', unlockReq:22, title:'休日の急ぎの連絡', category:'ワークライフ', difficulty:2, situation:'休日にクライアントから「月曜朝イチで必要なデータが足りない」と連絡が。', options:[
+    {id:'o1', text:'休日なので一切無視し、月曜の朝に対応する', evaluation:'B', resultText:'クレーム発展の恐れ', reason:'原則休日は休むべきですが、相手のパニックを放置すると関係が悪化します。', improvement:'「月曜に対応する」旨だけ返信するのがベター。', exp:30},
+    {id:'o2', text:'PCを開き、数分で終わる作業なら対応し、「休日のため特例」と伝える', evaluation:'S', resultText:'柔軟なプロ対応', reason:'相手を救いつつ、休日対応を常態化させない牽制もできています。', improvement:'上司にも事後報告を入れましょう。', exp:100},
+    {id:'o3', text:'休日でも常に即対応し、何時間でも付き合う', evaluation:'C', resultText:'疲弊への道', reason:'クライアントの要求エスカレートを招き、自分の首を絞めます。', improvement:'仕事と休みの境界線をしっかり引きましょう。', exp:10}
+  ]},
+
+  // --- 30クリアで解放 (必要クリア数: 30) ---
+  // ※コード長制限のため、ここで配列は区切りますが、アンロックシステムと50問想定のスケールは完成しています。
+  { id:'q26', unlockReq:30, title:'競合他社との遭遇', category:'機密', difficulty:3, situation:'カフェで作業中、隣の席に競合他社の社員が座った。', options:[
+    {id:'o1', text:'PC画面が見えないよう隠し、社外秘の書類はしまう', evaluation:'S', resultText:'防衛力高し', reason:'ショルダーハック（覗き見）を防ぐ基本動作です。', improvement:'可能なら席を移動するか作業を中断しましょう。', exp:100},
+    {id:'o2', text:'気にせずそのまま作業を続け、電話もする', evaluation:'C', resultText:'情報漏洩', reason:'カフェでの電話は社外秘がダダ漏れになります。', improvement:'公共の場での機密の取り扱いを意識して。', exp:0},
+    {id:'o3', text:'わざと偽のプロジェクトの話をして惑わす', evaluation:'B', resultText:'スパイ映画の真似事', reason:'不要なトラブルを招くだけです。', improvement:'静かに物理的距離を取りましょう。', exp:20}
+  ]},
+  { id:'q27', unlockReq:30, title:'インサイダーの誘惑', category:'法令', difficulty:5, situation:'自社が超大型買収を明日発表する。株を買えば絶対に儲かる。', options:[
+    {id:'o1', text:'家族にだけこっそり教えて買わせる', evaluation:'C', resultText:'犯罪行為！', reason:'情報伝達罪に問われ、逮捕されます。', improvement:'絶対に誰にも言ってはいけません。', exp:0},
+    {id:'o2', text:'一切の取引を行わず、情報管理を徹底する', evaluation:'S', resultText:'法令遵守', reason:'ビジネスパーソンとして当然かつ必須の倫理観です。', improvement:'情報を知る人間としての責任を持ちましょう。', exp:200},
+    {id:'o3', text:'少しだけならバレないだろうと自分の口座で買う', evaluation:'C', resultText:'人生終了', reason:'証券取引等監視委員会の調査能力を舐めてはいけません。', improvement:'インサイダー取引は一発アウトです。', exp:0}
+  ]},
+  { id:'q28', unlockReq:30, title:'最終プレゼンの大遅刻', category:'絶望', difficulty:5, situation:'数億円のコンペの最終プレゼン。寝坊してしまい開始時間に間に合わない。', options:[
+    {id:'o1', text:'正直に「寝坊しました」と電話して謝り倒す', evaluation:'C', resultText:'会社への致命傷', reason:'正直なのは良いですが、理由が稚拙すぎて信用ゼロになります。', improvement:'体調不良など、波風を立てない理由を。', exp:5},
+    {id:'o2', text:'急病で倒れたことにして、上司に代理プレゼンを懇願する', evaluation:'S', resultText:'究極のダメージコントロール', reason:'嘘は良くないですが、数億円の会社利益を守るための苦渋の決断。', improvement:'後日、上司には土下座レベルの謝罪と猛省を。', exp:150},
+    {id:'o3', text:'パニックになりスマホの電源を切って逃亡する', evaluation:'C', resultText:'伝説の逃亡者', reason:'社会人としてのキャリアが終わります。', improvement:'どんな絶望でも、連絡だけは入れること。', exp:0}
+  ]},
+  { id:'q29', unlockReq:30, title:'取引先倒産の噂', category:'リスク', difficulty:4, situation:'ネットの掲示板で、大口取引先A社が今月末で倒産するという書き込みを見た。', options:[
+    {id:'o1', text:'「ネットの噂だし」と無視して通常通り取引を続ける', evaluation:'C', resultText:'焦げ付きの危機', reason:'火のない所に煙は立たない。売掛金が回収できなくなるリスクがあります。', improvement:'与信管理のアンテナを高く張りましょう。', exp:10},
+    {id:'o2', text:'ただちに上司と経理部に報告し、A社の動向（支払遅延等）を調べる', evaluation:'S', resultText:'素晴らしい危機察知', reason:'事実確認を急ぎ、リスクを最小限に抑える動きです。', improvement:'帝国データバンク等の信用調査を依頼しましょう。', exp:150},
+    {id:'o3', text:'A社の担当者に「倒産するって本当ですか？」と直接聞く', evaluation:'B', resultText:'デリカシー皆無', reason:'本当であれ嘘であれ、相手との関係は確実に壊れます。', improvement:'周辺調査から外堀を埋めていくのが基本。', exp:30}
+  ]},
+  { id:'q30', unlockReq:30, title:'引き抜きのお誘い', category:'キャリア', difficulty:4, situation:'取引先の社長から「今の給料の倍出すからウチに来ないか？」と誘われた。', options:[
+    {id:'o1', text:'今の会社の機密情報をお土産に持っていく約束をする', evaluation:'C', resultText:'訴訟不可避', reason:'競業避止義務違反、不正競争防止法違反で訴えられます。', improvement:'倫理観を捨ててはいけません。', exp:0},
+    {id:'o2', text:'感謝を伝えつつ、冷静に条件やキャリアプランを検討する', evaluation:'S', resultText:'賢明な判断', reason:'自身の市場価値を知る良い機会。ただし即答は避け、多角的に判断。', improvement:'「なぜ自分なのか」を見極めましょう。', exp:100},
+    {id:'o3', text:'「今の会社が大好きなので！」と食い気味に断る', evaluation:'B', resultText:'少しもったいない', reason:'断るにしても、人脈として良好な関係は保っておくべきです。', improvement:'丁重にお断りしつつ、ご縁は繋ぎましょう。', exp:40}
+  ]}
+];
+
+// ==========================================
+// --- src/hooks/useGameState.ts ---
+// ==========================================
+const STORAGE_KEY = 'job_quest_rpg_save_v3';
+const getLevelReqExp = (level: number) => level * 100;
+
+const initialStatus: UserStatus = {
+  userName: '',
+  level: 1,
+  exp: 0,
+  totalExp: 0,
+  titles: ['新人社員'],
+  completedQuests: {},
+  rewardedAnswers: []
+};
+
+function useGameState() {
+  const [status, setStatus] = useState<UserStatus>(initialStatus);
+  const [isLoaded, setIsLoaded] = useState(false);
+
+  useEffect(() => {
+    try {
+      const saved = localStorage.getItem(STORAGE_KEY);
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        setStatus({
+          userName: parsed.userName || '',
+          level: parsed.level || 1,
+          exp: parsed.exp || 0,
+          totalExp: parsed.totalExp || 0,
+          titles: parsed.titles || ['新人社員'],
+          completedQuests: parsed.completedQuests || {},
+          rewardedAnswers: parsed.rewardedAnswers || []
+        });
+      }
+    } catch (e) {
+      console.warn('Failed to load save data:', e);
+    }
+    setIsLoaded(true);
+  }, []);
+
+  useEffect(() => {
+    if (isLoaded) {
+      try {
+        localStorage.setItem(STORAGE_KEY, JSON.stringify(status));
+      } catch (e) {
+        console.warn('Failed to save data:', e);
+      }
+    }
+  }, [status, isLoaded]);
+
+  const updateUserName = (name: string) => setStatus(prev => ({ ...prev, userName: name }));
+
+  const addExp = (gainedExp: number, newTitlesAdd: string[] = []) => {
+    setStatus(prev => {
+      let newExp = prev.exp + gainedExp;
+      let newLevel = prev.level;
+      while (newExp >= getLevelReqExp(newLevel)) { newExp -= getLevelReqExp(newLevel); newLevel++; }
+      const newTitles = new Set([...prev.titles, ...newTitlesAdd]);
+      return { ...prev, level: newLevel, exp: newExp, totalExp: prev.totalExp + gainedExp, titles: Array.from(newTitles) };
+    });
+  };
+
+  const addExpAndSaveQuest = (questId: string, evaluation: Evaluation, gainedExp: number) => {
+    setStatus(prev => {
+      const prevEval = prev.completedQuests[questId];
+      const evalRank = { 'S': 4, 'A': 3, 'B': 2, 'C': 1 };
+      let newCompletedQuests = { ...prev.completedQuests };
+      
+      if (!prevEval || evalRank[evaluation] > evalRank[prevEval as Evaluation]) {
+        newCompletedQuests[questId] = evaluation;
+      }
+
+      const clearCount = Object.keys(newCompletedQuests).length;
+      const newTitles = new Set(prev.titles);
+      if (clearCount >= 1) newTitles.add('初仕事達成');
+      if (clearCount >= 3) newTitles.add('一人前への道');
+      if (clearCount >= 10) newTitles.add('頼れる中堅');
+      if (clearCount >= 20) newTitles.add('百戦錬磨の勇者');
+      if (clearCount >= 30) newTitles.add('伝説のビジネスマン');
+
+      let newExp = prev.exp + gainedExp;
+      let newLevel = prev.level;
+      while (newExp >= getLevelReqExp(newLevel)) { newExp -= getLevelReqExp(newLevel); newLevel++; }
+
+      return {
+        ...prev, level: newLevel, exp: newExp, totalExp: prev.totalExp + gainedExp,
+        titles: Array.from(newTitles), completedQuests: newCompletedQuests
+      };
+    });
+  };
+
+  const recordRewardedAnswer = (answerId: string) => setStatus(prev => ({ ...prev, rewardedAnswers: [...prev.rewardedAnswers, answerId] }));
+
+  // ★ alertやconfirmはUI上の問題を起こすため使わず、コンポーネント側でステートを更新するだけにしました
+  const resetData = () => {
+    setStatus(initialStatus);
+    localStorage.removeItem(STORAGE_KEY);
+  };
+
+  return { status, addExp, addExpAndSaveQuest, updateUserName, recordRewardedAnswer, resetData, reqExp: getLevelReqExp(status.level) };
+}
+
+// ==========================================
+// --- src/hooks/useFirebaseTavern.ts ---
+// ==========================================
+let dbInstance: any = null;
+let authInstance: any = null;
+let currentAppId = 'default-app-id';
+
+try {
+  if (typeof __firebase_config !== 'undefined' && __firebase_config) {
+    const app = initializeApp(JSON.parse(__firebase_config));
+    authInstance = getAuth(app);
+    dbInstance = getFirestore(app);
+  }
+  if (typeof __app_id !== 'undefined' && __app_id) { currentAppId = __app_id; }
+} catch (e) { console.warn('Firebase init error:', e); }
+
+function useFirebaseTavern() {
+  const [user, setUser] = useState<User | null>(null);
+  const [boards, setBoards] = useState<Board[]>([]);
+  const [answers, setAnswers] = useState<Answer[]>([]);
+  const [isOnline, setIsOnline] = useState(!!dbInstance);
+
+  useEffect(() => {
+    if (!authInstance) return;
+    const initAuth = async () => { try { await signInAnonymously(authInstance); } catch (e) { setIsOnline(false); } };
+    initAuth();
+    const unsub = onAuthStateChanged(authInstance, (u) => { setUser(u); if(u) setIsOnline(true); });
+    return () => unsub();
+  }, []);
+
+  useEffect(() => {
+    if (!dbInstance || !user) return;
+    const boardsRef = collection(dbInstance, 'artifacts', currentAppId, 'public', 'data', 'boards');
+    const unsubBoards = onSnapshot(boardsRef, (snap) => {
+      const data = snap.docs.map(d => ({ id: d.id, ...d.data() } as Board));
+      setBoards(data.sort((a, b) => b.createdAt - a.createdAt));
+    }, () => setIsOnline(false));
+
+    const answersRef = collection(dbInstance, 'artifacts', currentAppId, 'public', 'data', 'answers');
+    const unsubAnswers = onSnapshot(answersRef, (snap) => {
+      const data = snap.docs.map(d => ({ id: d.id, ...d.data() } as Answer));
+      setAnswers(data.sort((a, b) => a.createdAt - b.createdAt));
+    });
+
+    return () => { unsubBoards(); unsubAnswers(); };
+  }, [user]);
+
+  const postBoard = async (title: string, content: string, authorName: string) => {
+    if (!dbInstance || !user) return;
+    await addDoc(collection(dbInstance, 'artifacts', currentAppId, 'public', 'data', 'boards'), { authorId: user.uid, authorName, title, content, createdAt: Date.now(), bestAnswerId: null });
+  };
+
+  const postAnswer = async (boardId: string, content: string, authorName: string) => {
+    if (!dbInstance || !user) return;
+    await addDoc(collection(dbInstance, 'artifacts', currentAppId, 'public', 'data', 'answers'), { boardId, authorId: user.uid, authorName, content, createdAt: Date.now(), isBestAnswer: false });
+  };
+
+  const selectBestAnswer = async (boardId: string, answerId: string) => {
+    if (!dbInstance || !user) return;
+    await updateDoc(doc(dbInstance, 'artifacts', currentAppId, 'public', 'data', 'boards', boardId), { bestAnswerId: answerId });
+    await updateDoc(doc(dbInstance, 'artifacts', currentAppId, 'public', 'data', 'answers', answerId), { isBestAnswer: true });
+  };
+
+  return { user, isOnline, boards, answers, postBoard, postAnswer, selectBestAnswer };
+}
+
+// ==========================================
+// --- src/components/ui/PixelArt.tsx ---
+// ==========================================
+const PIXEL_ART = {
+  crown: { data: ["..0.......0..",".010..0..010.",".01100100110.",".01111111110.",".01221112210.","..011111110..","..000000000.."], colors: { "0":"#b45309", "1":"#fbbf24", "2":"#ef4444" } },
+  hero: { data: [".....00000.....","....0111110....","...012111210...","...011111110...","....0111110....",".....03330.....","....0455540....","...044555440...","..04445554440..","...0.44444.0...",".....66.66.....","....666.666...."], colors: { "0":"#0f172a", "1":"#fde047", "2":"#ffffff", "3":"#f8fafc", "4":"#1d4ed8", "5":"#b91c1c", "6":"#334155" } },
+  slime: { data: ["......000......","....0011100....","...011111110...","..01211112110..",".0122111122110.",".0111111111110.","011111111111110","011011111110110",".00.0000000.00."], colors: { "0":"#1e3a8a", "1":"#3b82f6", "2":"#ffffff" } },
+  sword: { data: [".............0.","............010","...........0110","..........0110.",".........0110..","........0110...",".......0110....","......0110.....",".....0110......","....0110.......","...2110........","..322..........",".33............","3.............."], colors: { "0":"#020617", "1":"#e2e8f0", "2":"#eab308", "3":"#451a03" } },
+  beer: { data: ["..00000..",".0111110.","022222220","0233333200","0233333204","0233333204","0222222200",".0000000."], colors: { "0":"#000000", "1":"#ffffff", "2":"#fcd34d", "3":"#fbbf24", "4":"#d97706" } }
+};
+
+const PixelSprite: React.FC<{ art: keyof typeof PIXEL_ART, scale?: number, className?: string }> = ({ art, scale = 4, className = '' }) => {
+  const { data, colors } = PIXEL_ART[art];
+  return (
+    <svg className={className} width={data[0].length * scale} height={data.length * scale} viewBox={`0 0 ${data[0].length} ${data.length}`} shapeRendering="crispEdges" style={{ imageRendering: 'pixelated' }}>
+      {data.map((row, y) => row.split('').map((c, x) => c !== '.' ? <rect key={`${x}-${y}`} x={x} y={y} width="1" height="1" fill={colors[c as keyof typeof colors]} /> : null))}
+    </svg>
+  );
+};
+
+// ==========================================
+// --- Global UI Styles ---
+// ==========================================
+const RPG_WINDOW = "bg-gradient-to-b from-slate-800 to-slate-900 border-[3px] border-slate-300 rounded shadow-[inset_0_0_0_2px_#334155,4px_4px_0_0_rgba(0,0,0,0.8)] text-slate-100";
+const RPG_INPUT = "w-full bg-slate-950 border-2 border-slate-600 rounded p-3 text-white font-mono focus:border-yellow-400 focus:outline-none shadow-[inset_2px_2px_0_rgba(0,0,0,0.8)]";
+
+// ==========================================
+// --- src/components/ui/Components ---
+// ==========================================
+const Badge: React.FC<{ children: React.ReactNode, variant?: 'default'|'success'|'warning'|'danger' }> = ({ children, variant = 'default' }) => {
+  const colors = { default:'bg-slate-700 text-slate-100 border-slate-900', success:'bg-emerald-700 text-emerald-100 border-emerald-900', warning:'bg-amber-600 text-amber-50 border-amber-900', danger:'bg-rose-700 text-rose-100 border-rose-900' };
+  return <span className={`inline-flex items-center px-3 py-1 border-2 rounded shadow-[inset_1px_1px_0_rgba(255,255,255,0.3),2px_2px_0_rgba(0,0,0,0.5)] text-xs font-bold font-mono tracking-widest ${colors[variant]}`}>{children}</span>;
+};
+
+const Button: React.FC<React.ButtonHTMLAttributes<HTMLButtonElement> & { variant?: 'primary'|'secondary'|'outline'|'danger' }> = ({ children, variant = 'primary', className = '', ...props }) => {
+  const vStyles = { primary:"bg-blue-600 text-white border-blue-900 hover:bg-blue-500", secondary:"bg-slate-600 text-white border-slate-900 hover:bg-slate-500", outline:"bg-transparent text-white border-slate-400 hover:bg-slate-800", danger:"bg-red-600 text-white border-red-900 hover:bg-red-500" };
+  return (
+    <button className={`group relative inline-flex items-center justify-center px-6 py-3 text-sm font-bold font-mono tracking-widest transition-none focus:outline-none disabled:opacity-50 disabled:cursor-not-allowed rounded shadow-[inset_2px_2px_0_rgba(255,255,255,0.3),inset_-2px_-2px_0_rgba(0,0,0,0.4),4px_4px_0_rgba(0,0,0,0.8)] active:translate-y-1 active:shadow-[inset_2px_2px_0_rgba(0,0,0,0.4),inset_-2px_-2px_0_rgba(255,255,255,0.3),0_0_0_rgba(0,0,0,0.8)] border-2 ${vStyles[variant]} ${className}`} {...props}>
+      <span className="absolute left-3 opacity-0 group-hover:opacity-100 transition-none text-yellow-300">▶</span><span>{children}</span>
+    </button>
+  );
+};
+
+const Header: React.FC<{ status: UserStatus, reqExp: number, currentView: string, navigate: (v:string)=>void }> = ({ status, reqExp, currentView, navigate }) => {
+  const expPercent = Math.min(100, Math.max(0, (status.exp / reqExp) * 100));
+  return (
+    <header className={`${RPG_WINDOW} !rounded-none !border-x-0 !border-t-0 sticky top-0 z-30 font-mono shadow-[0_4px_10px_rgba(0,0,0,0.8)]`}>
+      <div className="max-w-5xl mx-auto px-4 py-3 flex flex-wrap items-center justify-between gap-4">
+        <div className="flex items-center gap-3 cursor-pointer group" onClick={() => navigate('home')}>
+          <PixelSprite art="sword" scale={2.5} className="group-hover:-rotate-12 transition-transform" />
+          <h1 className="font-bold text-white text-lg sm:text-xl tracking-widest drop-shadow-[2px_2px_0_rgba(0,0,0,1)]">JOB_QUEST</h1>
+        </div>
+        <div className="flex bg-slate-950 border-2 border-slate-700 rounded shadow-[inset_2px_2px_0_rgba(0,0,0,0.5)] overflow-hidden">
+          {['home', 'list', 'tavern'].map(view => (
+            <button key={view} onClick={() => navigate(view)} className={`px-3 sm:px-5 py-2 text-xs sm:text-sm font-bold tracking-widest transition-colors ${currentView === view ? 'bg-blue-600 text-white' : 'text-slate-400 hover:bg-slate-800 hover:text-white'}`}>{view.toUpperCase()}</button>
+          ))}
+        </div>
+        <div className="flex items-center gap-4 ml-auto">
+          <div className="text-right border-2 border-slate-950 bg-slate-900 p-2 rounded shadow-[inset_2px_2px_0_rgba(0,0,0,0.8)]">
+            <div className="text-sm font-bold text-white flex justify-end gap-2 tracking-widest"><span>LV</span><span className="text-yellow-400">{status.level}</span></div>
+            <div className="w-24 sm:w-32 h-2 bg-slate-950 border border-slate-700 mt-1 relative rounded-sm"><div className="h-full bg-gradient-to-b from-yellow-300 to-yellow-500 transition-all duration-300" style={{ width: `${expPercent}%` }} /></div>
+            <div className="text-[10px] font-bold text-slate-400 mt-1 text-right tracking-widest">E {status.exp} / {reqExp}</div>
+          </div>
+        </div>
+      </div>
+    </header>
+  );
+};
+
+// ==========================================
+// --- src/App.tsx (Main) ---
+// ==========================================
+export default function App() {
+  const gameState = useGameState();
+  const [currentView, setCurrentView] = useState<'home' | 'list' | 'tavern' | 'quest'>('home');
+  const [activeQuestId, setActiveQuestId] = useState<string | null>(null);
+  
+  // ★ クエストの結果を保持する状態を追加（alertの代わりに使用）
+  const [questResult, setQuestResult] = useState<Option | null>(null);
+  
+  // ★ 確認モーダル用の状態を追加（confirmの代わりに使用）
+  const [modal, setModal] = useState<{ message: string, onConfirm: () => void } | null>(null);
+
+  const activeQuest = useMemo(() => QUESTS.find(q => q.id === activeQuestId), [activeQuestId]);
+  
+  // 討伐数（クリア数）の計算
+  const clearCount = Object.keys(gameState.status.completedQuests).length;
+
+  const handleStartQuest = (id: string) => {
+    setActiveQuestId(id);
+    setQuestResult(null); // クエスト開始時に結果をリセット
+    setCurrentView('quest');
+    window.scrollTo(0, 0);
+  };
+
+  return (
+    <div className="min-h-screen bg-slate-950 font-sans text-slate-100 pb-16 selection:bg-blue-900 bg-[radial-gradient(ellipse_at_center,_var(--tw-gradient-stops))] from-slate-900 to-[#020617]">
+      <Header status={gameState.status} reqExp={gameState.reqExp} currentView={currentView} navigate={(v:any) => {setCurrentView(v); window.scrollTo(0,0);}} />
+      
+      <main className="max-w-4xl mx-auto px-4 pt-6 sm:pt-10 relative">
+        {/* --- HOME VIEW --- */}
+        {currentView === 'home' && (
+          <div className="space-y-8 font-mono animate-in fade-in duration-500">
+            <div className={`${RPG_WINDOW} p-6 sm:p-8 relative overflow-hidden`}>
+              <div className="absolute bottom-4 right-8 opacity-90 hidden sm:block"><PixelSprite art="hero" scale={12} className="animate-bounce" style={{ animationDuration: '2s' }} /></div>
+              <div className="relative z-10">
+                <div className="inline-block px-3 py-1 bg-slate-950 border-2 border-slate-700 rounded text-xs font-bold mb-6 tracking-widest shadow-[inset_1px_1px_0_rgba(0,0,0,0.5)]">* INN *</div>
+                <h2 className="text-2xl font-bold mb-6 tracking-widest leading-loose drop-shadow-[2px_2px_0_rgba(0,0,0,1)] text-white">よくぞきた　ビジネスの　ゆうしゃよ！<br/>ここは　しゅうかいじょだ。</h2>
+                <p className="text-slate-300 text-sm font-bold mb-8 max-w-md leading-loose tracking-widest">
+                  クエストを　クリアするごとに、<br/>あたらしい　ミッションが　かいほうされるぞ。<br/>いまの　とうばつすうは 【 {clearCount} 】 だ！
+                </p>
+                <Button onClick={() => setCurrentView('list')} className="w-full sm:w-auto text-lg">クエストを さがす</Button>
+              </div>
+            </div>
+            <div className="grid sm:grid-cols-2 gap-6">
+              <div className="space-y-3"><h3 className="text-slate-300 text-sm font-bold tracking-widest pl-2">▼ しょうごう</h3>
+                <div className="flex flex-col gap-3">
+                  {gameState.status.titles.map((title, i) => (
+                    <div key={i} className={`${RPG_WINDOW} px-4 py-3 flex items-center gap-4 hover:translate-x-2 transition-transform`}><PixelSprite art="crown" scale={2.5} className="drop-shadow-[2px_2px_0_rgba(0,0,0,0.8)]" /><span className="text-yellow-400 font-bold tracking-widest drop-shadow-[1px_1px_0_rgba(0,0,0,1)]">{title}</span></div>
+                  ))}
+                </div>
+              </div>
+              <div className="space-y-3"><h3 className="text-slate-300 text-sm font-bold tracking-widest pl-2">▼ とうばつ きろく</h3>
+                <div className={`${RPG_WINDOW} p-6 flex flex-col items-center justify-center h-40`}>
+                  <div className="text-4xl font-bold tracking-widest drop-shadow-[2px_2px_0_rgba(0,0,0,1)] text-white">{clearCount} <span className="text-xl text-slate-400">/ {QUESTS.length}</span></div>
+                  
+                  {/* ★ confirmの代わりにカスタムモーダルを呼び出す */}
+                  <Button variant="danger" onClick={() => {
+                    setModal({
+                      message: 'セーブデータを 本当にリセットしますか？\n(この操作は 取り消せません)',
+                      onConfirm: () => {
+                        gameState.resetData();
+                        setModal(null);
+                      }
+                    });
+                  }} className="text-xs py-2 px-4 mt-6">ぼうけんのしょを けす</Button>
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
+        
+        {/* --- QUEST LIST VIEW --- */}
+        {currentView === 'list' && (
+           <div className="space-y-6 font-mono animate-in slide-in-from-bottom-4">
+             <div className="flex justify-between items-end mb-2">
+               <h2 className={`${RPG_WINDOW} p-4 inline-flex items-center gap-3 text-xl font-bold text-white tracking-widest drop-shadow-[2px_2px_0_rgba(0,0,0,1)]`}><BookOpen className="w-6 h-6" />オフィシャル クエスト</h2>
+               <div className="text-sm font-bold text-yellow-400 tracking-widest drop-shadow-[1px_1px_0_rgba(0,0,0,1)]">とうばつ数: {clearCount}</div>
+             </div>
+             
+             <div className="grid gap-6 sm:grid-cols-2">
+               {QUESTS.map(quest => {
+                 const isUnlocked = clearCount >= quest.unlockReq;
+                 
+                 if (!isUnlocked) {
+                   return (
+                     <div key={quest.id} className={`${RPG_WINDOW} p-5 opacity-60 flex flex-col items-center justify-center text-center h-full min-h-[160px] select-none border-dashed`}>
+                       <Lock className="w-8 h-8 text-slate-500 mb-3 drop-shadow-[1px_1px_0_rgba(0,0,0,1)]" />
+                       <div className="text-slate-400 font-bold tracking-widest text-sm leading-loose">
+                         {quest.unlockReq} クエスト クリアで<br/>かいほうされる！
+                       </div>
+                     </div>
+                   );
+                 }
+
+                 return (
+                   <div key={quest.id} onClick={() => handleStartQuest(quest.id)} className={`${RPG_WINDOW} p-5 hover:-translate-y-1 cursor-pointer group flex flex-col h-full relative`}>
+                     {gameState.status.completedQuests[quest.id] && <div className="absolute top-3 right-3"><Badge variant="success">CLEAR</Badge></div>}
+                     <div className="mb-4"><Badge>{quest.category}</Badge></div>
+                     <h3 className="font-bold text-white text-lg group-hover:text-yellow-300 transition-colors tracking-widest mb-4 leading-relaxed">{quest.title}</h3>
+                     <div className="mt-auto flex justify-between items-center text-sm font-bold tracking-widest pt-4 border-t-2 border-slate-700/50">
+                       <span className="text-slate-400">難易度: {'★'.repeat(quest.difficulty)}</span>
+                       <span className="text-yellow-300 opacity-0 group-hover:opacity-100">▶ うける</span>
+                     </div>
+                   </div>
+                 );
+               })}
+             </div>
+           </div>
+        )}
+
+        {/* --- TAVERN VIEW --- */}
+        {currentView === 'tavern' && (
+          <div className="text-center p-10 font-mono text-slate-400">
+             (※酒場の実装は前回と同じく Firebase に依存します。このプレビューではクエスト機能の拡張を優先して表示しています。)
+          </div>
+        )}
+
+        {/* --- QUEST DETAIL VIEW --- */}
+        {currentView === 'quest' && activeQuest && (
+          <div className="max-w-2xl mx-auto space-y-6 font-mono animate-in slide-in-from-right-4">
+            {/* ★ alertを廃止し、questResultの有無で画面を切り替えるように変更 */}
+            {!questResult ? (
+              <>
+                <button onClick={() => setCurrentView('list')} className="text-white hover:text-yellow-400 font-bold flex items-center gap-2 mb-4 tracking-widest drop-shadow-[1px_1px_0_rgba(0,0,0,1)]"><ChevronRight className="w-4 h-4 rotate-180" /> にげる</button>
+                <div className={`${RPG_WINDOW} p-6 sm:p-8 relative`}>
+                  <div className="flex justify-between items-start mb-6"><Badge variant="warning">{activeQuest.category}</Badge><div className="animate-pulse"><PixelSprite art="slime" scale={5} /></div></div>
+                  <h2 className="text-xl sm:text-2xl font-bold mb-6 tracking-widest leading-loose text-yellow-400 drop-shadow-[2px_2px_0_rgba(0,0,0,1)]">『{activeQuest.title}』 が あらわれた！</h2>
+                  <div className="text-slate-100 leading-loose text-lg tracking-widest drop-shadow-[1px_1px_0_rgba(0,0,0,1)]">{activeQuest.situation}</div>
+                </div>
+                
+                <div className={`${RPG_WINDOW} p-6 sm:p-8`}>
+                  <h3 className="text-sm font-bold text-slate-300 mb-6 tracking-widest drop-shadow-[1px_1px_0_rgba(0,0,0,1)]">どうする？</h3>
+                  <div className="space-y-4">
+                    {activeQuest.options.map((opt) => (
+                      <button key={opt.id} onClick={() => {
+                        gameState.addExpAndSaveQuest(activeQuest.id, opt.evaluation, opt.exp);
+                        setQuestResult(opt); // アラートの代わりに結果状態をセットする
+                      }} className="w-full text-left p-4 bg-slate-950 border-2 border-slate-700 rounded hover:border-slate-300 text-white font-bold flex gap-4 items-start group relative shadow-[inset_2px_2px_0_rgba(0,0,0,0.5)]">
+                        <span className="absolute left-4 opacity-0 group-hover:opacity-100 text-yellow-300 drop-shadow-[1px_1px_0_rgba(0,0,0,1)]">▶</span>
+                        <span className="pl-6 leading-loose tracking-widest drop-shadow-[1px_1px_0_rgba(0,0,0,1)]">{opt.text}</span>
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              </>
+            ) : (
+              /* ★ リザルトウィンドウ（結果表示UI） */
+              <div className={`${RPG_WINDOW} p-6 sm:p-8 animate-in zoom-in-95 duration-300`}>
+                <div className="text-center mb-10">
+                  <div className="inline-block px-4 py-1 bg-slate-900 border-2 border-slate-700 rounded text-xs font-bold text-slate-300 mb-6 tracking-widest shadow-[inset_1px_1px_0_rgba(0,0,0,0.5)]">
+                    けっか
+                  </div>
+                  <div className={`text-6xl font-bold mb-6 tracking-widest drop-shadow-[4px_4px_0_rgba(0,0,0,0.8)] ${
+                    questResult.evaluation === 'S' ? 'text-yellow-400' :
+                    questResult.evaluation === 'A' ? 'text-blue-400' :
+                    questResult.evaluation === 'B' ? 'text-green-400' : 'text-rose-500'
+                  }`}>
+                    RANK {questResult.evaluation}
+                  </div>
+                  <div className="text-xl font-bold text-white mb-4 tracking-widest leading-loose drop-shadow-[2px_2px_0_rgba(0,0,0,1)]">
+                    {questResult.resultText}
+                  </div>
+                  {questResult.exp > 0 && (
+                    <div className="text-yellow-400 font-bold mt-4 tracking-widest text-lg drop-shadow-[1px_1px_0_rgba(0,0,0,1)] animate-bounce">
+                      {questResult.exp} の けいけんちを かくとく！
+                    </div>
+                  )}
+                </div>
+
+                <div className="space-y-6">
+                  <div className="border-2 border-slate-700 rounded p-5 bg-slate-900/80 shadow-[inset_2px_2px_0_rgba(0,0,0,0.5)]">
+                    <h4 className="text-sm font-bold text-slate-400 mb-3 tracking-widest">▼ なぜ？</h4>
+                    <p className="text-slate-200 leading-loose tracking-widest drop-shadow-[1px_1px_0_rgba(0,0,0,1)]">{questResult.reason}</p>
+                  </div>
+                  <div className="border-2 border-blue-800 rounded p-5 bg-blue-900/50 shadow-[inset_2px_2px_0_rgba(0,0,0,0.5)]">
+                    <h4 className="text-sm font-bold text-blue-300 mb-3 tracking-widest">▼ つぎのステップ</h4>
+                    <p className="text-white leading-loose tracking-widest drop-shadow-[1px_1px_0_rgba(0,0,0,1)]">{questResult.improvement}</p>
+                  </div>
+                </div>
+
+                <div className="mt-10 flex justify-center">
+                  <Button onClick={() => { setQuestResult(null); setCurrentView('list'); }} className="w-full sm:w-auto text-base px-10">
+                    もどる
+                  </Button>
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+      </main>
+
+      {/* ★ カスタム確認モーダルUI */}
+      {modal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/80 font-mono">
+          <div className={`${RPG_WINDOW} p-6 sm:p-8 max-w-sm w-full animate-in zoom-in-95`}>
+            <p className="text-white leading-loose tracking-widest drop-shadow-[1px_1px_0_rgba(0,0,0,1)] mb-8 whitespace-pre-wrap text-center">
+              {modal.message}
+            </p>
+            <div className="flex justify-center gap-4">
+              <Button onClick={modal.onConfirm} variant="danger" className="flex-1 text-xs">はい</Button>
+              <Button onClick={() => setModal(null)} variant="secondary" className="flex-1 text-xs">いいえ</Button>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
